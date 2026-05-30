@@ -1,0 +1,352 @@
+/* Add this at the very top of globals.css */
+@import 'leaflet/dist/leaflet.css';
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@tailwind base;
+/* ... rest of your css ... */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #08090d;
+  --bg-secondary: #0e1117;
+  --bg-panel: #111620;
+  --bg-card: #161c28;
+  --bg-elevated: #1a2133;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-active: rgba(99, 179, 237, 0.4);
+  --text-primary: #e8edf5;
+  --text-secondary: #8892a4;
+  --text-muted: #4a5568;
+  --accent-blue: #63b3ed;
+  --accent-cyan: #4fd1c5;
+  --accent-green: #68d391;
+  --accent-amber: #f6ad55;
+  --accent-red: #fc8181;
+  --accent-purple: #b794f4;
+  --glow-blue: rgba(99, 179, 237, 0.12);
+  --glow-cyan: rgba(79, 209, 197, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Panel surfaces */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.card-elevated {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/* Buttons */
+.btn-primary {
+  background: linear-gradient(135deg, #2b6cb0, #2c7a7b);
+  color: #e8edf5;
+  border: none;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 8px 16px;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 7px 14px;
+}
+
+.btn-ghost:hover {
+  border-color: var(--border-active);
+  color: var(--accent-blue);
+  background: var(--glow-blue);
+}
+
+.btn-validate {
+  background: linear-gradient(135deg, #276749, #2f855a);
+  color: #c6f6d5;
+  border: none;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 8px 20px;
+}
+
+.btn-validate:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+.btn-download {
+  background: linear-gradient(135deg, #553c9a, #6b46c1);
+  color: #e9d8fd;
+  border: none;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 8px 20px;
+}
+
+.btn-download:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+/* Status badges */
+.badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.badge-idle {
+  background: rgba(74, 85, 104, 0.3);
+  color: var(--text-muted);
+  border: 1px solid rgba(74, 85, 104, 0.3);
+}
+
+.badge-ready {
+  background: rgba(99, 179, 237, 0.12);
+  color: var(--accent-blue);
+  border: 1px solid rgba(99, 179, 237, 0.25);
+}
+
+.badge-running {
+  background: rgba(246, 173, 85, 0.12);
+  color: var(--accent-amber);
+  border: 1px solid rgba(246, 173, 85, 0.25);
+}
+
+.badge-done {
+  background: rgba(104, 211, 145, 0.12);
+  color: var(--accent-green);
+  border: 1px solid rgba(104, 211, 145, 0.25);
+}
+
+.badge-error {
+  background: rgba(252, 129, 129, 0.12);
+  color: var(--accent-red);
+  border: 1px solid rgba(252, 129, 129, 0.25);
+}
+
+/* Progress bar */
+.progress-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+  height: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #63b3ed, #4fd1c5);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+/* Log terminal */
+.log-terminal {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+
+.log-terminal .log-info {
+  color: var(--accent-blue);
+}
+
+.log-terminal .log-ok {
+  color: var(--accent-green);
+}
+
+.log-terminal .log-warn {
+  color: var(--accent-amber);
+}
+
+.log-terminal .log-error {
+  color: var(--accent-red);
+}
+
+.log-terminal .log-dim {
+  color: var(--text-muted);
+}
+
+/* Upload zone */
+.upload-zone {
+  border: 1.5px dashed rgba(99, 179, 237, 0.25);
+  border-radius: 8px;
+  background: rgba(99, 179, 237, 0.03);
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.upload-zone:hover,
+.upload-zone.drag-over {
+  border-color: rgba(99, 179, 237, 0.55);
+  background: var(--glow-blue);
+}
+
+/* Section label */
+.section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Coord pill */
+.coord-pill {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  background: rgba(99, 179, 237, 0.08);
+  border: 1px solid rgba(99, 179, 237, 0.2);
+  border-radius: 5px;
+  padding: 4px 10px;
+  color: var(--accent-blue);
+}
+
+/* Thin separator */
+.sep {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+/* Blinking cursor for terminal */
+@keyframes blink {
+
+  0%,
+  100% {
+    opacity: 1
+  }
+
+  50% {
+    opacity: 0
+  }
+}
+
+.cursor {
+  animation: blink 1.2s ease-in-out infinite;
+}
+
+/* Pulse dot for active state */
+@keyframes pulse-dot {
+
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1)
+  }
+
+  50% {
+    opacity: 0.6;
+    transform: scale(1.4)
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Map overlay fade */
+.overlay-fade {
+  animation: fadeIn 0.5s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0
+  }
+
+  to {
+    opacity: 1
+  }
+}
+
+/* Glow border for active panels */
+.glow-border {
+  box-shadow: 0 0 0 1px rgba(99, 179, 237, 0.3), 0 0 20px rgba(99, 179, 237, 0.06);
+}

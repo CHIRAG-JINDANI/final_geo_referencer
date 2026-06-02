@@ -1,11 +1,5 @@
-"""
-GeoRef Studio — FastAPI backend
-Exposes the CLAHE+SIFT+Homography+GeoTIFF pipeline via HTTP.
-"""
-
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
 import math
@@ -15,11 +9,8 @@ import httpx
 import rasterio
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
-import tempfile
-import os
-from pathlib import Path
 
-app = FastAPI(title="GeoRef Studio Pipeline", version="1.0.0")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,262 +19,163 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────────────────────
-#  helpers
-# ─────────────────────────────────────────────────────────────
+def get_mpp(lat, zoom):
+    return 156543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
 
-def meters_per_px(lat_deg: float, zoom: int) -> float:
-    """Google Maps pixel resolution at a given lat/zoom."""
-    return 156543.03392 * math.cos(math.radians(lat_deg)) / (2 ** zoom)
+def get_bounds(lat, lng, zoom, w, h):
+    mpp = get_mpp(lat, zoom)
+    hw = (w / 2) * mpp
+    hh = (h / 2) * mpp
+    dlat = hh / 111_320
+    dlng = hw / (111_320 * math.cos(math.radians(lat)))
+    return lat + dlat, lat - dlat, lng + dlng, lng - dlng
 
-
-def proxy_bounds(center_lat: float, center_lng: float, zoom: int, w: int, h: int):
-    """
-    Compute the geographic bounding box of a Google Maps Static API image.
-    Returns (north, south, east, west) in WGS84 degrees.
-    """
-    mpp = meters_per_px(center_lat, zoom)
-
-    # Pixel offsets → meters
-    half_w_m = (w / 2) * mpp
-    half_h_m = (h / 2) * mpp
-
-    # Meters → degrees (approximate, good enough for small tiles)
-    delta_lat = half_h_m / 111_320
-    delta_lng = half_w_m / (111_320 * math.cos(math.radians(center_lat)))
-
-    north = center_lat + delta_lat
-    south = center_lat - delta_lat
-    east  = center_lng + delta_lng
-    west  = center_lng - delta_lng
-
-    return north, south, east, west
-
-
-# ─────────────────────────────────────────────────────────────
-#  image preprocessing
-# ─────────────────────────────────────────────────────────────
-
-def apply_clahe_bilateral(img_bgr: np.ndarray) -> np.ndarray:
-    """CLAHE on L channel + bilateral denoise — identical to the reference script."""
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+def prep_img(img):
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     l_eq = clahe.apply(l)
-    enhanced = cv2.cvtColor(cv2.merge([l_eq, a, b]), cv2.COLOR_LAB2BGR)
-    return cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+    enh = cv2.cvtColor(cv2.merge([l_eq, a, b]), cv2.COLOR_LAB2BGR)
+    return cv2.bilateralFilter(enh, 9, 75, 75)
 
-
-# ─────────────────────────────────────────────────────────────
-#  keypoint detection
-# ─────────────────────────────────────────────────────────────
-
-def get_grid_keypoints(img: np.ndarray, rows: int = 4, cols: int = 4, min_kp: int = 15):
-    """
-    Grid-based SIFT detection — ensures spatial coverage across all image regions.
-    Falls back to lower contrast threshold if a cell has too few keypoints.
-    """
+def get_kps(img, r=4, c=4, mkp=15):
     h, w = img.shape[:2]
-    dh, dw = h // rows, w // cols
-    sift_hi = cv2.SIFT_create(contrastThreshold=0.04)
-    sift_lo = cv2.SIFT_create(contrastThreshold=0.01)
-    keypoints = []
-
-    for i in range(rows):
-        for j in range(cols):
+    dh, dw = h // r, w // c
+    shi = cv2.SIFT_create(contrastThreshold=0.04)
+    slo = cv2.SIFT_create(contrastThreshold=0.01)
+    kps = []
+    for i in range(r):
+        for j in range(c):
             y1 = i * dh
-            y2 = h if i == rows - 1 else (i + 1) * dh
+            y2 = h if i == r - 1 else (i + 1) * dh
             x1 = j * dw
-            x2 = w if j == cols - 1 else (j + 1) * dw
+            x2 = w if j == c - 1 else (j + 1) * dw
             roi = img[y1:y2, x1:x2]
-            kps = sift_hi.detect(roi, None)
-            if len(kps) < min_kp:
-                kps = sift_lo.detect(roi, None)
-            for kp in kps:
-                kp.pt = (kp.pt[0] + x1, kp.pt[1] + y1)
-                keypoints.append(kp)
+            k = shi.detect(roi, None)
+            if len(k) < mkp:
+                k = slo.detect(roi, None)
+            for pt in k:
+                pt.pt = (pt.pt[0] + x1, pt.pt[1] + y1)
+                kps.append(pt)
+    return kps
 
-    return keypoints
-
-
-# ─────────────────────────────────────────────────────────────
-#  main pipeline
-# ─────────────────────────────────────────────────────────────
-
-def run_pipeline(proxy_bgr: np.ndarray, ref_bgr: np.ndarray):
-    """
-    Full pipeline:
-      1. CLAHE + bilateral on both images
-      2. Grid SIFT keypoints
-      3. BFMatcher + Lowe ratio test
-      4. RANSAC homography
-      5. Warp reference onto proxy canvas
-      6. Return warp result + homography matrix
-    """
-    # Step 1: preprocess
-    proxy_pp = apply_clahe_bilateral(proxy_bgr)
-    ref_pp   = apply_clahe_bilateral(ref_bgr)
-
-    # Step 2: keypoints
+def get_matrix(proxy, ref):
+    proxy_pp = prep_img(proxy)
+    ref_pp = prep_img(ref)
+    proxy_pp = cv2.GaussianBlur(proxy_pp, (15, 15), 0)
+    
     sift = cv2.SIFT_create()
-    kp_proxy = get_grid_keypoints(proxy_pp)
-    kp_proxy, des_proxy = sift.compute(proxy_pp, kp_proxy)
-
-    kp_ref = get_grid_keypoints(ref_pp)
-    kp_ref, des_ref = sift.compute(ref_pp, kp_ref)
-
-    if des_proxy is None or des_ref is None:
-        raise ValueError("SIFT failed to compute descriptors — images may be too uniform")
-
-    # Step 3: match
+    kp_p = get_kps(proxy_pp)
+    kp_p, des_p = sift.compute(proxy_pp, kp_p)
+    kp_r = get_kps(ref_pp)
+    kp_r, des_r = sift.compute(ref_pp, kp_r)
+    
+    if des_p is None or des_r is None:
+        raise ValueError("sift failed")
+        
     bf = cv2.BFMatcher(cv2.NORM_L2)
-    matches = bf.knnMatch(des_ref, des_proxy, k=2)
+    matches = bf.knnMatch(des_r, des_p, k=2)
     good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-
+    
     if len(good) < 4:
-        raise ValueError(f"Too few good matches ({len(good)}) — try zooming in more")
+        raise ValueError("few matches")
+        
+    src = np.float32([kp_r[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst = np.float32([kp_p[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    
+    mat, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+    
+    if mat is None:
+        raise ValueError("affine failed")
+        
+    mat = np.vstack([mat, [0, 0, 1]])
+    
+    mask_list = mask.ravel().tolist()
+    inliers = [good[i] for i in range(len(good)) if mask_list[i] == 1]
+    score = len(inliers) / max(len(good), 1)
+    
+    return mat, inliers, score
 
-    # Step 4: homography
-    src_pts = np.float32([kp_ref[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp_proxy[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    matrix, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-
-    if matrix is None:
-        raise ValueError("Homography computation failed — insufficient spatial overlap")
-
-    matches_mask = mask.ravel().tolist()
-    inliers = [good[i] for i in range(len(good)) if matches_mask[i] == 1]
-
-    # Step 5: warp reference onto proxy canvas
-    h_p, w_p = proxy_bgr.shape[:2]
-    warped_ref = cv2.warpPerspective(ref_bgr, matrix, (w_p, h_p))
-
-    # Blend: mask out black regions of warp, composite onto proxy
-    gray_warped = cv2.cvtColor(warped_ref, cv2.COLOR_BGR2GRAY)
-    _, warp_mask = cv2.threshold(gray_warped, 1, 255, cv2.THRESH_BINARY)
-    mask_inv = cv2.bitwise_not(warp_mask)
-    bg = cv2.bitwise_and(proxy_bgr, proxy_bgr, mask=mask_inv)
-    merged = cv2.add(bg, warped_ref)
-
-    match_score = len(inliers) / max(len(good), 1)
-
-    return merged, matrix, inliers, match_score
-
-
-def build_geotiff(image_bgr: np.ndarray, north: float, south: float,
-                  east: float, west: float) -> bytes:
-    """Convert a BGR numpy image to a WGS84 GeoTIFF in memory."""
-    img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    h, w = img_rgb.shape[:2]
-    transform = from_bounds(west, south, east, north, w, h)
-    crs = CRS.from_epsg(4326)
-
+def make_tiff(img, n, s, e, w_coord):
+    h, w = img.shape[:2]
+    trans = from_bounds(w_coord, s, e, n, w, h)
+    c = CRS.from_epsg(4326)
     buf = io.BytesIO()
-    with rasterio.open(
-        buf, 'w',
-        driver='GTiff',
-        height=h, width=w,
-        count=3,
-        dtype=img_rgb.dtype,
-        crs=crs,
-        transform=transform,
-    ) as dst:
-        dst.write(img_rgb[:, :, 0], 1)
-        dst.write(img_rgb[:, :, 1], 2)
-        dst.write(img_rgb[:, :, 2], 3)
-
+    with rasterio.open(buf, 'w', driver='GTiff', height=h, width=w, count=4, dtype=img.dtype, crs=c, transform=trans) as dst:
+        dst.write(img[:, :, 2], 1)
+        dst.write(img[:, :, 1], 2)
+        dst.write(img[:, :, 0], 3)
+        dst.write(img[:, :, 3], 4)
     return buf.getvalue()
 
-
-# ─────────────────────────────────────────────────────────────
-#  routes
-# ─────────────────────────────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "georef-pipeline"}
-
-
 @app.post("/process")
-async def process(
-    reference_image: UploadFile = File(...),
-    proxy_url: str = Form(...),
-    center_lat: float = Form(...),
-    center_lng: float = Form(...),
-    zoom: int = Form(...),
-    map_width: int = Form(640),
-    map_height: int = Form(640),
-):
-    """
-    Main georeferencing endpoint.
-    Receives a reference image + proxy map URL + viewport metadata.
-    Returns stitched preview (base64), GeoTIFF (base64), and match stats.
-    """
+async def process(reference_image: UploadFile = File(...), proxy_url: str = Form(...), center_lat: float = Form(...), center_lng: float = Form(...), zoom: int = Form(...), map_width: int = Form(640), map_height: int = Form(640)):
     try:
-        # 1. Load reference image
-        ref_bytes = await reference_image.read()
-        ref_arr = np.frombuffer(ref_bytes, np.uint8)
-        ref_bgr = cv2.imdecode(ref_arr, cv2.IMREAD_COLOR)
-        if ref_bgr is None:
-            raise HTTPException(status_code=400, detail="Could not decode reference image")
-
-        # 2. Fetch proxy image from Google Maps Static API
+        ref_b = await reference_image.read()
+        ref_a = np.frombuffer(ref_b, np.uint8)
+        ref_img = cv2.imdecode(ref_a, cv2.IMREAD_COLOR)
+        if ref_img is None:
+            raise HTTPException(status_code=400, detail="decode fail")
+            
         async with httpx.AsyncClient(timeout=15) as client:
-            proxy_resp = await client.get(proxy_url)
-            if proxy_resp.status_code != 200:
-                raise HTTPException(status_code=502, detail="Failed to fetch proxy map image")
-            proxy_bytes = proxy_resp.content
-
-        proxy_arr = np.frombuffer(proxy_bytes, np.uint8)
-        proxy_bgr = cv2.imdecode(proxy_arr, cv2.IMREAD_COLOR)
-        if proxy_bgr is None:
-            raise HTTPException(status_code=502, detail="Could not decode proxy map image")
-
-        # 3. Run pipeline
-        merged_bgr, matrix, inliers, match_score = run_pipeline(proxy_bgr, ref_bgr)
-
-        # 4. Compute geographic bounds from proxy metadata
-        north, south, east, west = proxy_bounds(center_lat, center_lng, zoom, map_width, map_height)
-
-        # 5. Build GeoTIFF
-        geotiff_bytes = build_geotiff(merged_bgr, north, south, east, west)
-
-        # 6. Encode stitched preview as base64 data URL
-        _, stitched_enc = cv2.imencode('.jpg', merged_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        stitched_b64 = base64.b64encode(stitched_enc.tobytes()).decode()
-        stitched_data_url = f"data:image/jpeg;base64,{stitched_b64}"
-
-        # 7. Encode GeoTIFF as base64 data URL for download
-        geotiff_b64 = base64.b64encode(geotiff_bytes).decode()
-        geotiff_data_url = f"data:image/tiff;base64,{geotiff_b64}"
-
-        # 8. Build pixel→lat/lng transform matrix (3×3 affine)
-        mpp = meters_per_px(center_lat, zoom)
-        delta_lat_per_px = mpp / 111_320
-        delta_lng_per_px = mpp / (111_320 * math.cos(math.radians(center_lat)))
-        pixel_to_latlng = [
-            [west, delta_lng_per_px, 0],
-            [north, 0, -delta_lat_per_px],
-            [0, 0, 1],
-        ]
-
+            resp = await client.get(proxy_url)
+            proxy_b = resp.content
+            
+        proxy_a = np.frombuffer(proxy_b, np.uint8)
+        proxy_img = cv2.imdecode(proxy_a, cv2.IMREAD_COLOR)
+        
+        mat, inls, score = get_matrix(proxy_img, ref_img)
+        n, s, e, w_coord = get_bounds(center_lat, center_lng, zoom, map_width, map_height)
+        
+        hr, wr = ref_img.shape[:2]
+        corn = np.float32([[0, 0], [wr, 0], [wr, hr], [0, hr]]).reshape(-1, 1, 2)
+        w_corn = cv2.perspectiveTransform(corn, mat)
+        
+        minx = int(np.floor(np.min(w_corn[:, 0, 0])))
+        maxx = int(np.ceil(np.max(w_corn[:, 0, 0])))
+        miny = int(np.floor(np.min(w_corn[:, 0, 1])))
+        maxy = int(np.ceil(np.max(w_corn[:, 0, 1])))
+        
+        lat_px = (n - s) / map_height
+        lng_px = (e - w_coord) / map_width
+        
+        rw = w_coord + (minx * lng_px)
+        re = w_coord + (maxx * lng_px)
+        rn = n - (miny * lat_px)
+        rs = n - (maxy * lat_px)
+        
+        ow = max(wr, hr)
+        oh = int(ow * ((maxy - miny) / (maxx - minx))) if (maxx - minx) > 0 else ow
+        
+        sx = ow / (maxx - minx)
+        sy = oh / (maxy - miny)
+        t_mat = np.array([[sx, 0, -minx * sx], [0, sy, -miny * sy], [0, 0, 1]])
+        h_mat = t_mat @ mat
+        
+        w_ref = cv2.warpPerspective(ref_img, h_mat, (ow, oh), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        
+        b, g, r = cv2.split(w_ref)
+        alp = np.where((b == 0) & (g == 0) & (r == 0), 0, 255).astype(np.uint8)
+        rgba = cv2.merge((b, g, r, alp))
+        
+        tiff = make_tiff(rgba, rn, rs, re, rw)
+        tiff_b64 = base64.b64encode(tiff).decode()
+        
+        ph = 800
+        pw = int(ow * (ph / oh))
+        p_img = cv2.resize(rgba, (pw, ph), interpolation=cv2.INTER_AREA)
+        _, s_enc = cv2.imencode('.png', p_img)
+        s_b64 = base64.b64encode(s_enc.tobytes()).decode()
+        
         return {
-            "stitchedUrl": stitched_data_url,
-            "geotiffUrl": geotiff_data_url,
-            "overlayBounds": {
-                "north": north,
-                "south": south,
-                "east": east,
-                "west": west,
-            },
-            "inlierCount": len(inliers),
-            "matchScore": round(match_score, 4),
-            "pixelToLatLng": pixel_to_latlng,
+            "stitchedUrl": f"data:image/png;base64,{s_b64}",
+            "geotiffUrl": f"data:image/tiff;base64,{tiff_b64}",
+            "overlayBounds": {"north": rn, "south": rs, "east": re, "west": rw},
+            "inlierCount": len(inls),
+            "matchScore": round(score, 4),
+            "pixelToLatLng": []
         }
-
     except HTTPException:
         raise
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err))

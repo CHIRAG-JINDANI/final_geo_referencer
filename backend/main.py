@@ -62,6 +62,8 @@ def get_kps(img, r=4, c=4, mkp=15):
 def get_matrix(proxy, ref):
     proxy_pp = prep_img(proxy)
     ref_pp = prep_img(ref)
+    
+    # Intentional blur to match the low-frequency data of false-color/blurry images
     proxy_pp = cv2.GaussianBlur(proxy_pp, (15, 15), 0)
     
     sift = cv2.SIFT_create()
@@ -71,23 +73,25 @@ def get_matrix(proxy, ref):
     kp_r, des_r = sift.compute(ref_pp, kp_r)
     
     if des_p is None or des_r is None:
-        raise ValueError("sift failed")
+        raise ValueError("SIFT failed to compute descriptors.")
         
     bf = cv2.BFMatcher(cv2.NORM_L2)
     matches = bf.knnMatch(des_r, des_p, k=2)
     good = [m for m, n in matches if m.distance < 0.75 * n.distance]
     
     if len(good) < 4:
-        raise ValueError("few matches")
+        raise ValueError("Too few matches. Try zooming in or out on the map.")
         
     src = np.float32([kp_r[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst = np.float32([kp_p[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
     
+    # 2D Affine lock (X, Y, Scale, Rotation ONLY - no 3D stretching)
     mat, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=5.0)
     
     if mat is None:
-        raise ValueError("affine failed")
+        raise ValueError("Affine transformation failed.")
         
+    # Upgrade 2x3 matrix to 3x3 for compatibility with perspective math
     mat = np.vstack([mat, [0, 0, 1]])
     
     mask_list = mask.ravel().tolist()
@@ -101,7 +105,15 @@ def make_tiff(img, n, s, e, w_coord):
     trans = from_bounds(w_coord, s, e, n, w, h)
     c = CRS.from_epsg(4326)
     buf = io.BytesIO()
-    with rasterio.open(buf, 'w', driver='GTiff', height=h, width=w, count=4, dtype=img.dtype, crs=c, transform=trans) as dst:
+    with rasterio.open(
+        buf, 'w', 
+        driver='GTiff', 
+        height=h, width=w, 
+        count=4, 
+        dtype=img.dtype, 
+        crs=c, 
+        transform=trans
+    ) as dst:
         dst.write(img[:, :, 2], 1)
         dst.write(img[:, :, 1], 2)
         dst.write(img[:, :, 0], 3)
@@ -109,13 +121,21 @@ def make_tiff(img, n, s, e, w_coord):
     return buf.getvalue()
 
 @app.post("/process")
-async def process(reference_image: UploadFile = File(...), proxy_url: str = Form(...), center_lat: float = Form(...), center_lng: float = Form(...), zoom: int = Form(...), map_width: int = Form(640), map_height: int = Form(640)):
+async def process(
+    reference_image: UploadFile = File(...), 
+    proxy_url: str = Form(...), 
+    center_lat: float = Form(...), 
+    center_lng: float = Form(...), 
+    zoom: int = Form(...), 
+    map_width: int = Form(640), 
+    map_height: int = Form(640)
+):
     try:
         ref_b = await reference_image.read()
         ref_a = np.frombuffer(ref_b, np.uint8)
         ref_img = cv2.imdecode(ref_a, cv2.IMREAD_COLOR)
         if ref_img is None:
-            raise HTTPException(status_code=400, detail="decode fail")
+            raise HTTPException(status_code=400, detail="Could not decode reference image.")
             
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(proxy_url)
@@ -124,6 +144,7 @@ async def process(reference_image: UploadFile = File(...), proxy_url: str = Form
         proxy_a = np.frombuffer(proxy_b, np.uint8)
         proxy_img = cv2.imdecode(proxy_a, cv2.IMREAD_COLOR)
         
+        # 1. Math & Bounds
         mat, inls, score = get_matrix(proxy_img, ref_img)
         n, s, e, w_coord = get_bounds(center_lat, center_lng, zoom, map_width, map_height)
         
@@ -152,17 +173,51 @@ async def process(reference_image: UploadFile = File(...), proxy_url: str = Form
         t_mat = np.array([[sx, 0, -minx * sx], [0, sy, -miny * sy], [0, 0, 1]])
         h_mat = t_mat @ mat
         
-        w_ref = cv2.warpPerspective(ref_img, h_mat, (ow, oh), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        # 2. Warp Original Image
+        w_ref = cv2.warpPerspective(
+            ref_img, h_mat, (ow, oh), 
+            flags=cv2.INTER_LANCZOS4, 
+            borderMode=cv2.BORDER_CONSTANT, 
+            borderValue=(0, 0, 0)
+        )
+
+        # 3. MASKING & CROPPING (The Fix)
+        # Create a pure white mask matching the original image size
+        mask_raw = np.full((hr, wr), 255, dtype=np.uint8)
+        # Warp the mask exactly like the image
+        w_mask = cv2.warpPerspective(
+            mask_raw, h_mat, (ow, oh), 
+            flags=cv2.INTER_NEAREST, 
+            borderMode=cv2.BORDER_CONSTANT, 
+            borderValue=0
+        )
         
-        b, g, r = cv2.split(w_ref)
-        alp = np.where((b == 0) & (g == 0) & (r == 0), 0, 255).astype(np.uint8)
-        rgba = cv2.merge((b, g, r, alp))
+        # Find the bounding box of the valid (white) pixels in the mask
+        crop_x, crop_y, crop_w, crop_h = cv2.boundingRect(w_mask)
         
-        tiff = make_tiff(rgba, rn, rs, re, rw)
+        # Slice both the image and the mask to remove dead space
+        cropped_ref = w_ref[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
+        cropped_mask = w_mask[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
+        
+        # 4. Merge into RGBA
+        b, g, r = cv2.split(cropped_ref)
+        rgba = cv2.merge((b, g, r, cropped_mask))
+        
+        # 5. Shift Geographic Coordinates to match the crop
+        out_lat_px = (rn - rs) / oh
+        out_lng_px = (re - rw) / ow
+        
+        final_rn = rn - (crop_y * out_lat_px)
+        final_rs = rn - ((crop_y + crop_h) * out_lat_px)
+        final_rw = rw + (crop_x * out_lng_px)
+        final_re = rw + ((crop_x + crop_w) * out_lng_px)
+        
+        # 6. Build Outputs
+        tiff = make_tiff(rgba, final_rn, final_rs, final_re, final_rw)
         tiff_b64 = base64.b64encode(tiff).decode()
         
         ph = 800
-        pw = int(ow * (ph / oh))
+        pw = int(crop_w * (ph / crop_h))
         p_img = cv2.resize(rgba, (pw, ph), interpolation=cv2.INTER_AREA)
         _, s_enc = cv2.imencode('.png', p_img)
         s_b64 = base64.b64encode(s_enc.tobytes()).decode()
@@ -170,7 +225,7 @@ async def process(reference_image: UploadFile = File(...), proxy_url: str = Form
         return {
             "stitchedUrl": f"data:image/png;base64,{s_b64}",
             "geotiffUrl": f"data:image/tiff;base64,{tiff_b64}",
-            "overlayBounds": {"north": rn, "south": rs, "east": re, "west": rw},
+            "overlayBounds": {"north": final_rn, "south": final_rs, "east": final_re, "west": final_rw},
             "inlierCount": len(inls),
             "matchScore": round(score, 4),
             "pixelToLatLng": []

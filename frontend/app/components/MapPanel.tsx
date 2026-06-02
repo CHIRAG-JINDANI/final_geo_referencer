@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { MapContainer, TileLayer, ImageOverlay, useMapEvents } from 'react-leaflet'
+import MapSearchBox from './MapSearchBox' // <--- ADDED IMPORT
 import type { AppStage, MapViewport, ProcessingResult } from './Dashboard'
 
 interface MapPanelProps {
@@ -28,7 +29,6 @@ function MapEvents({ onViewportChange }: { onViewportChange: (vp: MapViewport) =
 }
 
 export default function MapPanel({ stage, viewport, result, onViewportChange }: MapPanelProps) {
-  // Prevent Next.js SSR crashes (Leaflet requires the window object)
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
   if (!mounted) return null
@@ -41,13 +41,16 @@ export default function MapPanel({ stage, viewport, result, onViewportChange }: 
         style={{ width: '100%', height: '100%', zIndex: 0 }}
         zoomControl={false}
       >
-        {/* Esri World Imagery (Free Satellite layer commonly used in OSM tools) */}
+        {/* Esri World Imagery */}
         <TileLayer
           url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
           attribution="&copy; Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EAP, and the GIS User Community"
         />
 
         <MapEvents onViewportChange={onViewportChange} />
+
+        {/* THE SEARCH BOX - Now mounted inside the map! */}
+        <MapSearchBox />
 
         {/* Result overlay */}
         {result && (stage === 'preview' || stage === 'validated') && (
@@ -83,27 +86,17 @@ export default function MapPanel({ stage, viewport, result, onViewportChange }: 
 function Crosshair({ captured }: { captured: boolean }) {
   return (
     <div style={{ position: 'relative', width: 0, height: 0 }}>
-      {/* Outer ring */}
       <div style={{
-        position: 'absolute',
-        width: captured ? 80 : 64,
-        height: captured ? 80 : 64,
+        position: 'absolute', width: captured ? 80 : 64, height: captured ? 80 : 64,
         border: `1.5px solid ${captured ? 'rgba(104,211,145,0.8)' : 'rgba(99,179,237,0.6)'}`,
-        borderRadius: '50%',
-        top: captured ? -40 : -32,
-        left: captured ? -40 : -32,
+        borderRadius: '50%', top: captured ? -40 : -32, left: captured ? -40 : -32,
         transition: 'all 0.3s ease',
       }} />
-      {/* Inner dot */}
       <div style={{
-        position: 'absolute',
-        width: 6, height: 6,
-        borderRadius: '50%',
-        background: captured ? '#68d391' : '#63b3ed',
-        top: -3, left: -3,
+        position: 'absolute', width: 6, height: 6, borderRadius: '50%',
+        background: captured ? '#68d391' : '#63b3ed', top: -3, left: -3,
         boxShadow: `0 0 8px ${captured ? '#68d391' : '#63b3ed'}`,
       }} />
-      {/* Cross lines */}
       <div style={{ position: 'absolute', width: 20, height: 1, background: captured ? 'rgba(104,211,145,0.6)' : 'rgba(99,179,237,0.6)', top: 0, left: -25 }} />
       <div style={{ position: 'absolute', width: 20, height: 1, background: captured ? 'rgba(104,211,145,0.6)' : 'rgba(99,179,237,0.6)', top: 0, left: 5 }} />
       <div style={{ position: 'absolute', width: 1, height: 20, background: captured ? 'rgba(104,211,145,0.6)' : 'rgba(99,179,237,0.6)', top: -25, left: 0 }} />

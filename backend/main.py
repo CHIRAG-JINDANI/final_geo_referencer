@@ -63,6 +63,7 @@ def get_matrix(proxy, ref):
     proxy_pp = prep_img(proxy)
     ref_pp = prep_img(ref)
     
+    # Intentional blur to match the low-frequency data of false-color/blurry images
     proxy_pp = cv2.GaussianBlur(proxy_pp, (15, 15), 0)
     
     sift = cv2.SIFT_create()
@@ -84,21 +85,13 @@ def get_matrix(proxy, ref):
     src = np.float32([kp_r[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst = np.float32([kp_p[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
     
-    # --- SUB-PIXEL REFINEMENT ---
-    gray_r = cv2.cvtColor(ref_pp, cv2.COLOR_BGR2GRAY)
-    gray_p = cv2.cvtColor(proxy_pp, cv2.COLOR_BGR2GRAY)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.001)
-    
-    src = cv2.cornerSubPix(gray_r, src, (5, 5), (-1, -1), criteria)
-    dst = cv2.cornerSubPix(gray_p, dst, (5, 5), (-1, -1), criteria)
-    
-    # --- FULL AFFINE TRANSFORM ---
-    # Tightened RANSAC to 2.0 to force absolute structural perfection
-    mat, mask = cv2.estimateAffine2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=2.0)
+    # 2D Affine lock (X, Y, Scale, Rotation ONLY - no 3D stretching)
+    mat, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=5.0)
     
     if mat is None:
-        raise ValueError("Full Affine transformation failed.")
+        raise ValueError("Affine transformation failed.")
         
+    # Upgrade 2x3 matrix to 3x3 for compatibility with perspective math
     mat = np.vstack([mat, [0, 0, 1]])
     
     mask_list = mask.ravel().tolist()
@@ -151,6 +144,7 @@ async def process(
         proxy_a = np.frombuffer(proxy_b, np.uint8)
         proxy_img = cv2.imdecode(proxy_a, cv2.IMREAD_COLOR)
         
+        # 1. Math & Bounds
         mat, inls, score = get_matrix(proxy_img, ref_img)
         n, s, e, w_coord = get_bounds(center_lat, center_lng, zoom, map_width, map_height)
         
@@ -179,6 +173,7 @@ async def process(
         t_mat = np.array([[sx, 0, -minx * sx], [0, sy, -miny * sy], [0, 0, 1]])
         h_mat = t_mat @ mat
         
+        # 2. Warp Original Image
         w_ref = cv2.warpPerspective(
             ref_img, h_mat, (ow, oh), 
             flags=cv2.INTER_LANCZOS4, 
@@ -186,7 +181,10 @@ async def process(
             borderValue=(0, 0, 0)
         )
 
+        # 3. MASKING & CROPPING (The Fix)
+        # Create a pure white mask matching the original image size
         mask_raw = np.full((hr, wr), 255, dtype=np.uint8)
+        # Warp the mask exactly like the image
         w_mask = cv2.warpPerspective(
             mask_raw, h_mat, (ow, oh), 
             flags=cv2.INTER_NEAREST, 
@@ -194,14 +192,18 @@ async def process(
             borderValue=0
         )
         
+        # Find the bounding box of the valid (white) pixels in the mask
         crop_x, crop_y, crop_w, crop_h = cv2.boundingRect(w_mask)
         
+        # Slice both the image and the mask to remove dead space
         cropped_ref = w_ref[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
         cropped_mask = w_mask[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
         
+        # 4. Merge into RGBA
         b, g, r = cv2.split(cropped_ref)
         rgba = cv2.merge((b, g, r, cropped_mask))
         
+        # 5. Shift Geographic Coordinates to match the crop
         out_lat_px = (rn - rs) / oh
         out_lng_px = (re - rw) / ow
         
@@ -210,6 +212,7 @@ async def process(
         final_rw = rw + (crop_x * out_lng_px)
         final_re = rw + ((crop_x + crop_w) * out_lng_px)
         
+        # 6. Build Outputs
         tiff = make_tiff(rgba, final_rn, final_rs, final_re, final_rw)
         tiff_b64 = base64.b64encode(tiff).decode()
         

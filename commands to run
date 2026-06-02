@@ -1,0 +1,19 @@
+commands to use:
+
+
+1. Backend (FastAPI)
+Bash
+--------------------------------------------
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+--------------------------------------------
+
+
+2. Frontend (Next.js)
+Bash
+--------------------------------------------
+cd frontend
+npm install
+npm run dev
+--------------------------------------------
